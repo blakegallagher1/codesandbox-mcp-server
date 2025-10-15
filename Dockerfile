@@ -9,7 +9,7 @@ COPY package*.json ./
 COPY tsconfig.json ./
 
 # Install dependencies (production only)
-RUN npm ci --only=production
+RUN npm ci
 
 # Copy source code
 COPY src ./src
@@ -36,3 +36,4 @@ HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
 
 # Start the server
 CMD ["node", "dist/index.js"]
+
