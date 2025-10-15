@@ -19,7 +19,7 @@ export async function startHttpServer(_mcpServer: Server): Promise<http.Server> 
     // Enable CORS for ChatGPT access
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'POST, GET, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Mcp-Session-Id');
     res.setHeader('Content-Type', 'application/json');
 
     // Handle OPTIONS preflight
@@ -37,14 +37,180 @@ export async function startHttpServer(_mcpServer: Server): Promise<http.Server> 
         uptime: `${Math.floor(uptime)} seconds`,
         timestamp: new Date().toISOString(),
         transport: 'http',
-        port: httpPort
+        port: httpPort,
+        endpoints: {
+          health: '/health',
+          sse: '/sse',
+          message: '/message',
+          mcp: '/mcp'
+        }
       };
       res.writeHead(200);
       res.end(JSON.stringify(healthStatus, null, 2));
       return;
     }
 
-    // MCP protocol endpoint
+    // SSE endpoint for ChatGPT MCP connector
+    if (req.method === 'GET' && req.url === '/sse') {
+      res.setHeader('Content-Type', 'text/event-stream');
+      res.setHeader('Cache-Control', 'no-cache');
+      res.setHeader('Connection', 'keep-alive');
+      res.setHeader('Access-Control-Allow-Origin', '*');
+      
+      // Determine protocol (http vs https)
+      const protocol = req.headers['x-forwarded-proto'] || 'http';
+      const host = req.headers.host || `localhost:${httpPort}`;
+      
+      // Send endpoint configuration
+      const endpoint = {
+        jsonrpc: '2.0',
+        method: 'endpoint',
+        params: {
+          type: 'sse',
+          uri: `${protocol}://${host}/message`
+        }
+      };
+      
+      res.write(`data: ${JSON.stringify(endpoint)}\n\n`);
+      
+      // Keep connection alive with periodic keepalive
+      const keepAlive = setInterval(() => {
+        res.write(': keepalive\n\n');
+      }, 30000);
+      
+      // Clean up on connection close
+      req.on('close', () => {
+        clearInterval(keepAlive);
+        res.end();
+      });
+      
+      return;
+    }
+
+    // Message endpoint for SSE transport (handles tool calls from ChatGPT)
+    if (req.method === 'POST' && req.url === '/message') {
+      let body = '';
+
+      req.on('data', (chunk) => {
+        body += chunk.toString();
+      });
+
+      req.on('end', async () => {
+        try {
+          const message = JSON.parse(body);
+
+          logger.info({
+            method: message.method || 'unknown',
+            id: message.id,
+            timestamp: new Date().toISOString()
+          });
+
+          let response;
+
+          // Handle initialize
+          if (message.method === 'initialize') {
+            response = {
+              jsonrpc: '2.0',
+              id: message.id,
+              result: {
+                protocolVersion: '2024-11-05',
+                capabilities: {
+                  tools: {}
+                },
+                serverInfo: {
+                  name: 'codesandbox-mcp-server',
+                  version: '1.0.0',
+                  description: 'MCP server for CodeSandbox integration'
+                }
+              }
+            };
+          } else if (message.method === 'tools/list') {
+            response = {
+              jsonrpc: '2.0',
+              id: message.id,
+              result: {
+                tools: ALL_TOOLS.map((tool) => ({
+                  name: tool.name,
+                  description: tool.description,
+                  inputSchema: tool.inputSchema
+                }))
+              }
+            };
+          } else if (message.method === 'tools/call') {
+            const { name, arguments: args } = message.params;
+            const tool = ALL_TOOLS.find((t) => t.name === name);
+
+            if (!tool) {
+              throw new MCPError(
+                'TOOL_NOT_FOUND' as any,
+                `Tool '${name}' not found`,
+                404,
+                false
+              );
+            }
+
+            const userId = 'default_user';
+            const result = await tool.handler(args || {}, userId);
+
+            response = {
+              jsonrpc: '2.0',
+              id: message.id,
+              result: {
+                content: [
+                  {
+                    type: 'text',
+                    text: JSON.stringify(result, null, 2)
+                  }
+                ]
+              }
+            };
+          } else {
+            response = {
+              jsonrpc: '2.0',
+              id: message.id,
+              error: {
+                code: -32601,
+                message: `Method not found: ${message.method}`
+              }
+            };
+          }
+
+          res.writeHead(200);
+          res.end(JSON.stringify(response));
+        } catch (error) {
+          const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+          logger.error({ error: sanitizeErrorMessage(errorMessage) }, 'Message request failed');
+
+          res.writeHead(500);
+          res.end(JSON.stringify({
+            jsonrpc: '2.0',
+            error: {
+              code: -32603,
+              message: 'Internal error',
+              data: sanitizeErrorMessage(errorMessage)
+            },
+            id: null
+          }));
+        }
+      });
+
+      req.on('error', (error) => {
+        logger.error({ error: sanitizeErrorMessage(error.message) }, 'Message request error');
+        res.writeHead(400);
+        res.end(JSON.stringify({
+          jsonrpc: '2.0',
+          error: {
+            code: -32700,
+            message: 'Parse error'
+          },
+          id: null
+        }));
+      });
+
+      return;
+    }
+
+    // MCP protocol endpoint (backward compatibility)
     if (req.method === 'POST' && req.url === '/mcp') {
       let body = '';
 
@@ -199,7 +365,7 @@ export async function startHttpServer(_mcpServer: Server): Promise<http.Server> 
     res.writeHead(404);
     res.end(JSON.stringify({
       error: 'Not found',
-      message: 'Available endpoints: GET /health, POST /mcp'
+      message: 'Available endpoints: GET /health, GET /sse, POST /message, POST /mcp'
     }));
   });
 
@@ -208,6 +374,8 @@ export async function startHttpServer(_mcpServer: Server): Promise<http.Server> 
     server.listen(httpPort, () => {
       logger.info(`HTTP MCP server listening on port ${httpPort}`);
       logger.info(`Health check: http://localhost:${httpPort}/health`);
+      logger.info(`SSE endpoint: http://localhost:${httpPort}/sse`);
+      logger.info(`Message endpoint: http://localhost:${httpPort}/message`);
       logger.info(`MCP endpoint: http://localhost:${httpPort}/mcp`);
       resolve();
     });
