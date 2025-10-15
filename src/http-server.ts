@@ -57,11 +57,9 @@ export async function startHttpServer(_mcpServer: Server): Promise<http.Server> 
       res.setHeader('Connection', 'keep-alive');
       res.setHeader('Access-Control-Allow-Origin', '*');
       
-      // Determine protocol (http vs https)
       const protocol = req.headers['x-forwarded-proto'] || 'http';
       const host = req.headers.host || `localhost:${httpPort}`;
       
-      // Send endpoint configuration
       const endpoint = {
         jsonrpc: '2.0',
         method: 'endpoint',
@@ -73,12 +71,10 @@ export async function startHttpServer(_mcpServer: Server): Promise<http.Server> 
       
       res.write(`data: ${JSON.stringify(endpoint)}\n\n`);
       
-      // Keep connection alive with periodic keepalive
       const keepAlive = setInterval(() => {
         res.write(': keepalive\n\n');
       }, 30000);
       
-      // Clean up on connection close
       req.on('close', () => {
         clearInterval(keepAlive);
         res.end();
@@ -87,7 +83,7 @@ export async function startHttpServer(_mcpServer: Server): Promise<http.Server> 
       return;
     }
 
-    // Message endpoint for SSE transport (handles tool calls from ChatGPT)
+    // Message endpoint for SSE transport
     if (req.method === 'POST' && req.url === '/message') {
       let body = '';
 
@@ -102,12 +98,29 @@ export async function startHttpServer(_mcpServer: Server): Promise<http.Server> 
           logger.info({
             method: message.method || 'unknown',
             id: message.id,
-            timestamp: new Date().toISOString()
+            timestamp: new Date().toISOString(),
+            rawParams: message.params
           });
+
+          // FIX: Handle ChatGPT's flat params structure
+          if (message.method === 'tools/call' && message.params) {
+            const { name, arguments: args, ...rest } = message.params;
+            
+            // If arguments are missing but we have other params (ChatGPT format), nest them
+            if (!args && Object.keys(rest).length > 0) {
+              message.params = {
+                name,
+                arguments: rest
+              };
+              logger.info('Fixed flat params structure for ChatGPT compatibility', {
+                original: { name, ...rest },
+                fixed: message.params
+              });
+            }
+          }
 
           let response;
 
-          // Handle initialize
           if (message.method === 'initialize') {
             response = {
               jsonrpc: '2.0',
@@ -220,7 +233,6 @@ export async function startHttpServer(_mcpServer: Server): Promise<http.Server> 
 
       req.on('end', async () => {
         try {
-          // Parse incoming JSON-RPC message
           const message = JSON.parse(body);
 
           logger.info({
@@ -229,7 +241,6 @@ export async function startHttpServer(_mcpServer: Server): Promise<http.Server> 
             timestamp: new Date().toISOString()
           });
 
-          // Handle different MCP requests
           let response;
 
           if (message.method === 'tools/list') {
@@ -325,7 +336,6 @@ export async function startHttpServer(_mcpServer: Server): Promise<http.Server> 
             };
           }
 
-          // Send response
           res.writeHead(200);
           res.end(JSON.stringify(response));
         } catch (error) {
@@ -369,7 +379,6 @@ export async function startHttpServer(_mcpServer: Server): Promise<http.Server> 
     }));
   });
 
-  // Start listening
   await new Promise<void>((resolve) => {
     server.listen(httpPort, () => {
       logger.info(`HTTP MCP server listening on port ${httpPort}`);
