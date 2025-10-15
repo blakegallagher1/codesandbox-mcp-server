@@ -112,10 +112,7 @@ export async function startHttpServer(_mcpServer: Server): Promise<http.Server> 
                 name,
                 arguments: rest
               };
-              logger.info('Fixed flat params structure for ChatGPT compatibility', {
-                original: { name, ...rest },
-                fixed: message.params
-              });
+              logger.info({ msg: "Fixed flat params for ChatGPT", fixedParams: message.params });
             }
           }
 
