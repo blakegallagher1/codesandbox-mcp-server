@@ -1,0 +1,36 @@
+version: '3.8'
+
+services:
+  mcp-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: codesandbox-mcp-server
+    ports:
+      - "${MCP_PORT:-3000}:3000"
+    environment:
+      - MCP_PORT=${MCP_PORT:-3000}
+      - CSB_API_KEY=${CSB_API_KEY}
+      - CSB_WORKSPACE_ID=${CSB_WORKSPACE_ID}
+      - CSB_GITHUB_TOKEN_REPO_1=${CSB_GITHUB_TOKEN_REPO_1}
+      - CSB_GITHUB_TOKEN_REPO_2=${CSB_GITHUB_TOKEN_REPO_2}
+      - RATE_LIMIT_PER_MINUTE=${RATE_LIMIT_PER_MINUTE:-10}
+      - SANDBOX_IDLE_TIMEOUT_MS=${SANDBOX_IDLE_TIMEOUT_MS:-600000}
+      - MAX_SANDBOX_AGE_MS=${MAX_SANDBOX_AGE_MS:-3600000}
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+      - AUDIT_LOG_LEVEL=${AUDIT_LOG_LEVEL:-info}
+    volumes:
+      - ./logs:/app/logs
+    restart: unless-stopped
+    networks:
+      - mcp-net
+    healthcheck:
+      test: ["CMD", "node", "-e", "process.exit(0)"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+
+networks:
+  mcp-net:
+    driver: bridge
